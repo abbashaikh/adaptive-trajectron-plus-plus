@@ -266,6 +266,11 @@ parser.add_argument("--eval_data_dict",
                     type=str,
                     default='val.pkl')
 
+parser.add_argument("--eval_device",
+                    help="what device to use during evaluation",
+                    type=str,
+                    default=None)
+
 # Training Parameters
 parser.add_argument(
     "--learning_rate",
