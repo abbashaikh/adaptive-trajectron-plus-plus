@@ -118,8 +118,8 @@ def train(rank, args):
         #######################################################################
         # Make sure to specify your desired project and entity names if needed!
         run = wandb.init(
-            project=None,
-            entity=None,
+            project="adaptive-trajectron-plus-plus",
+            entity="shaikh18-purdue-university",
             name=hyperparams["log_tag"],
             notes=f"{model_name}, {train_scene}",
             job_type="train",
