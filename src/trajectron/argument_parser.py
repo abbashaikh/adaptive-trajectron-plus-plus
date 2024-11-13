@@ -251,26 +251,6 @@ parser.add_argument(
     "--device", help="what device to perform training on", type=str, default="cuda:0"
 )
 
-parser.add_argument("--data_dir",
-                    help="what dir to look in for data",
-                    type=str,
-                    default='../experiments/processed')
-
-parser.add_argument("--train_data_dict",
-                    help="what file to load for training data",
-                    type=str,
-                    default='train.pkl')
-
-parser.add_argument("--eval_data_dict",
-                    help="what file to load for evaluation data",
-                    type=str,
-                    default='val.pkl')
-
-parser.add_argument("--eval_device",
-                    help="what device to use during evaluation",
-                    type=str,
-                    default=None)
-
 # Training Parameters
 parser.add_argument(
     "--learning_rate",
