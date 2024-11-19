@@ -80,7 +80,7 @@ class OnlineTrajectron(Trajectron):
 
         self.nodes.remove(node)
         del self.node_models_dict[node]
-
+    
     def set_environment(self, env, init_timestep=0):
         self.env = env
         self.scene_graph = SceneGraph(edge_radius=self.env.attention_radius)
@@ -125,8 +125,8 @@ class OnlineTrajectron(Trajectron):
                         dtype=(
                             float,
                             sum(
-                                len(self.state[node.type][k])
-                                for k in self.state[node.type]
+                                len(self.state[node.type.name][k])
+                                for k in self.state[node.type.name]
                             ),
                         ),
                     )
@@ -199,7 +199,7 @@ class OnlineTrajectron(Trajectron):
                 for node in new_nodes:
                     if (
                         node.is_robot and self.hyperparams["incl_robot_node"]
-                    ) or node.type not in self.pred_state.keys():
+                    ) or node.type.name not in self.pred_state.keys():
                         # Only deal with Models for NodeTypes we want to predict
                         continue
 
@@ -211,7 +211,7 @@ class OnlineTrajectron(Trajectron):
                 for node in removed_nodes:
                     if (
                         node.is_robot and self.hyperparams["incl_robot_node"]
-                    ) or node.type not in self.pred_state.keys():
+                    ) or node.type.name not in self.pred_state.keys():
                         continue
 
                     self._remove_node_model(node)
@@ -225,7 +225,7 @@ class OnlineTrajectron(Trajectron):
                 iter_list = list(self.node_models_dict.keys()) + [
                     node
                     for node in new_inputs_dict
-                    if node.type not in self.pred_state.keys()
+                    if node.type.name not in self.pred_state.keys()
                 ]
                 if self.env.scenes[0].robot is not None:
                     iter_list.append(self.env.scenes[0].robot)
@@ -233,17 +233,17 @@ class OnlineTrajectron(Trajectron):
                 for node in iter_list:
                     input_np = node.get(
                         np.array([node.last_timestep, node.last_timestep]),
-                        self.state[node.type],
+                        self.state[node.type.name],
                     )
 
                     _, std = self.env.get_standardize_params(
-                        self.state[node.type.name], node.type
+                        self.state[node.type.name], node.type.name
                     )
                     std[0:2] = self.env.attention_radius[(node.type, node.type)]
                     rel_state = np.zeros_like(input_np)
                     rel_state[:, 0:2] = input_np[:, 0:2]
                     input_st = self.env.standardize(
-                        input_np, self.state[node.type.name], node.type, mean=rel_state
+                        input_np, self.state[node.type.name], node.type.name, mean=rel_state
                     )
                     self.rel_states[node] = rel_state
 
@@ -318,10 +318,10 @@ class OnlineTrajectron(Trajectron):
             all_z_sep=all_z_sep,
         )
 
-        # predictions_np = predictions_uns.cpu().detach().numpy()
+        predictions_np = predictions_uns.cpu().detach().numpy()
 
         # Return will be of shape (batch_size, num_samples, num_predicted_timesteps, 2)
-        return prediction_dist  # , np.transpose(predictions_np, (1, 0, 2, 3))
+        return prediction_dist, np.transpose(predictions_np, (1, 0, 2, 3))
 
     def sample_model(
         self,
@@ -360,18 +360,16 @@ class OnlineTrajectron(Trajectron):
                 if node.is_robot:
                     continue
 
-                prediction_dists[node] = self._run_decoder(
-                    node,
-                    num_predicted_timesteps,
-                    num_samples,
-                    robot_present_and_future,
-                    z_mode,
-                    gmm_mode,
-                    full_dist,
-                    all_z_sep,
-                )
+                prediction_dists[node], predictions_dict[node] = self._run_decoder(node,
+                                                                                    num_predicted_timesteps,
+                                                                                    num_samples,
+                                                                                    robot_present_and_future,
+                                                                                    z_mode,
+                                                                                    gmm_mode,
+                                                                                    full_dist,
+                                                                                    all_z_sep)
 
-        return prediction_dists  # , predictions_dict
+        return prediction_dists, predictions_dict
 
     def forward(
         self,

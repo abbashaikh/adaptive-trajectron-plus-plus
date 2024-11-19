@@ -36,9 +36,9 @@ class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
             raise ValueError("Passed in Environment has number of scenes != 1")
 
         super(OnlineMultimodalGenerativeCVAE, self).__init__(
-            env, node.type, model_registrar, hyperparams, device, edge_types=[]
+            node.type, model_registrar, hyperparams, device, edge_types=[]
         )
-
+        self.env = env
         self.node = node
         self.robot = env.scenes[0].robot
 
@@ -46,6 +46,7 @@ class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
 
         self.curr_hidden_states = dict()
         self.edge_types = Counter()
+        self.new_neighbors = dict()     # stores neighbor information of current scene graph
 
         self.create_initial_graphical_model()
 
@@ -67,6 +68,7 @@ class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
 
     def update_graph(self, new_scene_graph, new_neighbors, removed_neighbors):
         self.scene_graph = new_scene_graph
+        self.new_neighbors = new_neighbors
 
         if self.node in new_neighbors:
             for edge_type, new_neighbor_nodes in new_neighbors[self.node].items():
@@ -111,7 +113,7 @@ class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
 
                 elif self.hyperparams["edge_state_combine_method"] == "attention":
                     self.add_submodule(
-                        self.node.type + "/edge_attention_combine",
+                        self.node.type.name + "/edge_attention_combine",
                         model_if_absent=TemporallyBatchedAdditiveAttention(
                             encoder_hidden_state_dim=self.state_length,
                             decoder_hidden_state_dim=self.state_length,
@@ -236,8 +238,9 @@ class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
             #####################
             # Encode Node Edges #
             #####################
+            num_neighbors = len(self.new_neighbors[self.node].items())
             total_edge_influence = self.encode_total_edge_influence(
-                mode, node_edges_encoded, node_history_encoded, batch_size
+                mode, node_edges_encoded, num_neighbors, node_history_encoded, batch_size
             )
 
         self.TD = {
@@ -340,18 +343,18 @@ class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
 
     def encode_node_history(self, inputs_st):
         new_state = torch.unsqueeze(inputs_st, dim=1)  # [bs, 1, state_dim]
-        if self.node.type + "/node_history_encoder" not in self.curr_hidden_states:
+        if self.node.type.name + "/node_history_encoder" not in self.curr_hidden_states:
             (
                 outputs,
-                self.curr_hidden_states[self.node.type + "/node_history_encoder"],
-            ) = self.node_modules[self.node.type + "/node_history_encoder"](new_state)
+                self.curr_hidden_states[self.node.type.name + "/node_history_encoder"],
+            ) = self.node_modules[self.node.type.name + "/node_history_encoder"](new_state)
         else:
             (
                 outputs,
-                self.curr_hidden_states[self.node.type + "/node_history_encoder"],
-            ) = self.node_modules[self.node.type + "/node_history_encoder"](
+                self.curr_hidden_states[self.node.type.name + "/node_history_encoder"],
+            ) = self.node_modules[self.node.type.name + "/node_history_encoder"](
                 new_state,
-                self.curr_hidden_states[self.node.type + "/node_history_encoder"],
+                self.curr_hidden_states[self.node.type.name + "/node_history_encoder"],
             )
 
         return outputs[:, 0, :]
@@ -369,7 +372,7 @@ class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
 
             # Make State relative to node
             _, std = self.env.get_standardize_params(
-                self.state[node.type], node_type=node.type
+                self.state[node.type.name], node_type=node.type
             )
             std[0:2] = self.env.attention_radius[edge_type_tuple]
 
@@ -380,7 +383,7 @@ class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
             rel_state[..., :equal_dims] = orig_rel_state[..., :equal_dims]
             neighbor_state_np_st = self.env.standardize(
                 neighbor_state_np,
-                self.state[node.type],
+                self.state[node.type.name],
                 node_type=node.type,
                 mean=rel_state,
                 std=std,
@@ -396,7 +399,7 @@ class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
                 np.sum(
                     [
                         len(entity_dims)
-                        for entity_dims in self.state[edge_type[1]].values()
+                        for entity_dims in self.state[edge_type.split("->",1)[-1]].values()
                     ]
                 )
             )
@@ -510,7 +513,7 @@ class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
             our_inputs = torch.tensor(
                 self.node.get(
                     np.array([self.node.last_timestep]),
-                    self.state[self.node.type],
+                    self.state[self.node.type.name],
                     padding=0.0,
                 ),
                 dtype=torch.float,
