@@ -1,4 +1,7 @@
-dict = {1: "one", 2:"two"}
+import torch
 
-for i in dict:
-    print(i)
+a = torch.ones((5, 4), dtype=torch.bool)
+print(a)
+b = torch.triu(a, diagonal=0)
+print(b)
+print(b[3])

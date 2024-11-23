@@ -101,6 +101,7 @@ class OnlineTrajectron(Trajectron):
     def incremental_forward(
         self,
         new_inputs_dict,
+        nodes_hist_len,
         maps,
         prediction_horizon=0,
         num_samples=0,
@@ -278,7 +279,7 @@ class OnlineTrajectron(Trajectron):
 
                 for node in self.node_models_dict:
                     self.node_models_dict[node].encoder_forward(
-                        inputs, inputs_st, inputs_np, robot_present_and_future, maps
+                        inputs, inputs_st, inputs_np, nodes_hist_len, robot_present_and_future, maps
                     )
 
                 # If num_predicted_timesteps or num_samples == 0 then do not run the decoder at all,

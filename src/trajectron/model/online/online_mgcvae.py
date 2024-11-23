@@ -46,7 +46,6 @@ class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
 
         self.curr_hidden_states = dict()
         self.edge_types = Counter()
-        self.new_neighbors = dict()     # stores neighbor information of current scene graph
 
         self.create_initial_graphical_model()
 
@@ -68,19 +67,18 @@ class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
 
     def update_graph(self, new_scene_graph, new_neighbors, removed_neighbors):
         self.scene_graph = new_scene_graph
-        self.new_neighbors = new_neighbors
 
         if self.node in new_neighbors:
             for edge_type, new_neighbor_nodes in new_neighbors[self.node].items():
-                self.add_edge_model(edge_type)
                 self.edge_types += Counter({edge_type: len(new_neighbor_nodes)})
+                self.add_edge_model(edge_type)
 
         if self.node in removed_neighbors:
-            for edge_type, removed_neighbor_nodes in removed_neighbors[
-                self.node
-            ].items():
-                self.remove_edge_model(edge_type)
+            for edge_type, removed_neighbor_nodes in removed_neighbors[self.node].items():
                 self.edge_types -= Counter({edge_type: len(removed_neighbor_nodes)})
+                if self.edge_types[edge_type]==0:
+                    self.remove_edge_model(edge_type)
+                
 
     def get_edge_to(self, other_node):
         return DirectedEdge(self.node, other_node)
@@ -157,7 +155,7 @@ class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
                 del self.node_modules[edge_type + "/edge_encoder"]
 
     def obtain_encoded_tensors(
-        self, mode, inputs, inputs_st, inputs_np, robot_present_and_future, maps
+        self, mode, inputs, inputs_st, inputs_np, nodes_hist_len, robot_present_and_future, maps
     ):
         x, x_r_t, y_r = None, None, None
         batch_size = 1
@@ -238,9 +236,10 @@ class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
             #####################
             # Encode Node Edges #
             #####################
-            num_neighbors = len(self.new_neighbors[self.node].items())
+            num_neighbors = self.edge_types[edge_type]
+            node_hist_len = nodes_hist_len[self.node]
             total_edge_influence = self.encode_total_edge_influence(
-                mode, node_edges_encoded, num_neighbors, node_history_encoded, batch_size
+                mode, node_edges_encoded[0], num_neighbors, node_history_encoded, node_hist_len, batch_size
             )
 
         self.TD = {
@@ -399,7 +398,7 @@ class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
                 np.sum(
                     [
                         len(entity_dims)
-                        for entity_dims in self.state[edge_type.split("->",1)[-1]].values()
+                        for entity_dims in self.state[edge_type_tuple[-1].name].values()
                     ]
                 )
             )
@@ -477,13 +476,13 @@ class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
             return outputs[:, 0, :]  # [bs, enc_rnn_dim]
 
     def encoder_forward(
-        self, inputs, inputs_st, inputs_np, robot_present_and_future=None, maps=None
+        self, inputs, inputs_st, inputs_np, nodes_hist_len, robot_present_and_future=None, maps=None
     ):
         # Always predicting with the online model.
         mode = ModeKeys.PREDICT
 
         self.x = self.obtain_encoded_tensors(
-            mode, inputs, inputs_st, inputs_np, robot_present_and_future, maps
+            mode, inputs, inputs_st, inputs_np, nodes_hist_len, robot_present_and_future, maps
         )
         self.n_s_t0 = inputs_st[self.node]
 
