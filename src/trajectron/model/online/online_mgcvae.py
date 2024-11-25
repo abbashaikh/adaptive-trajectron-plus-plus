@@ -15,11 +15,14 @@
 
 import warnings
 from collections import Counter, defaultdict
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from trajdata import AgentBatch
 
 import trajectron.model.dynamics as dynamic_module
 from trajectron.environment.node_type import NodeType
@@ -31,23 +34,24 @@ from trajectron.model.model_utils import *
 
 
 class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
-    def __init__(self, env, node, model_registrar, hyperparams, device):
-        if len(env.scenes) != 1:
-            raise ValueError("Passed in Environment has number of scenes != 1")
+    def __init__(self, node_type, model_registrar, hyperparams, device, edge_types):
 
         super(OnlineMultimodalGenerativeCVAE, self).__init__(
-            node.type, model_registrar, hyperparams, device, edge_types=[]
+            node_type, model_registrar, hyperparams, device, edge_types
         )
-        self.env = env
-        self.node = node
-        self.robot = env.scenes[0].robot
+        self.n_s_t0: torch.Tensor = torch.empty(size=(1, self.state_length))
+        self.x : torch.Tensor
+        
+        # self.env = env
+        # self.node = node
+        # self.robot = env.scenes[0].robot
 
-        self.scene_graph = None
+        # self.scene_graph = None
 
-        self.curr_hidden_states = dict()
-        self.edge_types = Counter()
+        # self.curr_hidden_states = dict()
+        # self.edge_types = Counter()
 
-        self.create_initial_graphical_model()
+        # self.create_initial_graphical_model()
 
     def create_initial_graphical_model(self):
         """
@@ -154,125 +158,6 @@ class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
             ):
                 del self.node_modules[edge_type + "/edge_encoder"]
 
-    def obtain_encoded_tensors(
-        self, mode, inputs, inputs_st, inputs_np, nodes_hist_len, robot_present_and_future, maps
-    ):
-        x, x_r_t, y_r = None, None, None
-        batch_size = 1
-
-        our_inputs = inputs[self.node]
-        our_inputs_st = inputs_st[self.node]
-
-        initial_dynamics = dict()
-        initial_dynamics["pos"] = our_inputs[:, 0:2]  # TODO: Generalize
-        initial_dynamics["vel"] = our_inputs[:, 2:4]  # TODO: Generalize
-        self.dynamic.set_initial_condition(initial_dynamics)
-
-        #########################################
-        # Provide basic information to encoders #
-        #########################################
-        if self.hyperparams["incl_robot_node"] and self.robot is not None:
-            node_state = torch.zeros(
-                (robot_present_and_future.shape[-1],),
-                dtype=torch.float,
-                device=self.device,
-            )
-            node_state[: our_inputs.shape[1]] = our_inputs[0]
-            robot_present_and_future_st = get_relative_robot_traj(
-                self.env,
-                self.state,
-                node_state,
-                robot_present_and_future,
-                self.node.type,
-                self.robot.type,
-            )
-            x_r_t = robot_present_and_future_st[..., 0, :]
-            y_r = robot_present_and_future_st[..., 1:, :]
-
-        ##################
-        # Encode History #
-        ##################
-        node_history_encoded = self.encode_node_history(our_inputs_st)
-
-        ##############################
-        # Encode Node Edges per Type #
-        ##############################
-        total_edge_influence = None
-        if self.hyperparams["edge_encoding"]:
-            node_edges_encoded = list()
-            for edge_type in self.edge_types:
-                connected_nodes_batched = list()
-                edge_masks_batched = list()
-
-                # We get all nodes which are connected to the current node for the current timestep
-                connected_nodes_batched.append(
-                    self.scene_graph.get_neighbors(
-                        self.node, self._get_other_node_type_from_edge(edge_type)
-                    )
-                )
-
-                if self.hyperparams["dynamic_edges"] == "yes":
-                    # We get the edge masks for the current node at the current timestep
-                    edge_masks_for_node = self.scene_graph.get_edge_scaling(self.node)
-                    edge_masks_batched.append(
-                        torch.tensor(
-                            edge_masks_for_node, dtype=torch.float, device=self.device
-                        )
-                    )
-
-                # Encode edges for given edge type
-                encoded_edges_type = self.encode_edge(
-                    inputs,
-                    inputs_st,
-                    inputs_np,
-                    edge_type,
-                    connected_nodes_batched,
-                    edge_masks_batched,
-                )
-                node_edges_encoded.append(
-                    encoded_edges_type
-                )  # List of [bs/nbs, enc_rnn_dim]
-
-            #####################
-            # Encode Node Edges #
-            #####################
-            num_neighbors = self.edge_types[edge_type]
-            node_hist_len = nodes_hist_len[self.node]
-            total_edge_influence = self.encode_total_edge_influence(
-                mode, node_edges_encoded[0], num_neighbors, node_history_encoded, node_hist_len, batch_size
-            )
-
-        self.TD = {
-            "node_history_encoded": node_history_encoded,
-            "total_edge_influence": total_edge_influence,
-        }
-
-        ################
-        # Map Encoding #
-        ################
-        if (
-            self.hyperparams["map_encoding"]
-            and self.node_type in self.hyperparams["map_encoder"]
-        ):
-            if self.node not in maps:
-                # This means the node was removed (it is only being kept around because of the edge removal filter).
-                me_params = self.hyperparams["map_encoder"][self.node_type]
-                self.TD["encoded_map"] = torch.zeros((1, me_params["output_size"]))
-            else:
-                encoded_map = self.node_modules[self.node_type + "/map_encoder"](
-                    maps[self.node] * 2.0 - 1.0, (mode == ModeKeys.TRAIN)
-                )
-                do = self.hyperparams["map_encoder"][self.node_type]["dropout"]
-                encoded_map = F.dropout(
-                    encoded_map, do, training=(mode == ModeKeys.TRAIN)
-                )
-                self.TD["encoded_map"] = encoded_map
-
-        ######################################
-        # Concatenate Encoder Outputs into x #
-        ######################################
-        return self.create_encoder_rep(mode, self.TD, x_r_t, y_r)
-
     def create_encoder_rep(self, mode, TD, robot_present_st, robot_future_st):
         # Unpacking TD
         node_history_encoded = TD["node_history_encoded"]
@@ -339,152 +224,208 @@ class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
             x_concat_list.append(encoded_map)  # [bs/nbs, CNN output size]
 
         return torch.cat(x_concat_list, dim=1)
+    
+    def obtain_encoded_tensors(
+        self, mode: ModeKeys, obs: AgentBatch, idx
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        """
+        Encodes input and output tensors for node and robot.
 
-    def encode_node_history(self, inputs_st):
-        new_state = torch.unsqueeze(inputs_st, dim=1)  # [bs, 1, state_dim]
-        if self.node.type.name + "/node_history_encoder" not in self.curr_hidden_states:
-            (
-                outputs,
-                self.curr_hidden_states[self.node.type.name + "/node_history_encoder"],
-            ) = self.node_modules[self.node.type.name + "/node_history_encoder"](new_state)
-        else:
-            (
-                outputs,
-                self.curr_hidden_states[self.node.type.name + "/node_history_encoder"],
-            ) = self.node_modules[self.node.type.name + "/node_history_encoder"](
-                new_state,
-                self.curr_hidden_states[self.node.type.name + "/node_history_encoder"],
-            )
+        :param mode: Mode in which the model is operated. E.g. Train, Eval, Predict.
+        :param inputs: Input tensor including the state for each agent over time [bs, t, state].
+        :param inputs_st: Standardized input tensor.
+        :param labels: Label tensor including the label output for each agent over time [bs, t, pred_state].
+        :param labels_st: Standardized label tensor.
+        :param first_history_indices: First timestep (index) in scene for which data is available for a node [bs]
+        :param neighbors: Preprocessed dict (indexed by edge type) of list of neighbor states over time.
+                            [[bs, t, neighbor state]]
+        :param neighbors_edge_value: Preprocessed edge values for all neighbor nodes [[N]]
+        :param robot: Standardized robot state over time. [bs, t, robot_state]
+        :param map: Tensor of Map information. [bs, channels, x, y]
+        :return: tuple(x, x_nr_t, y_e, y_r, y, n_s_t0)
+            WHERE
+            - x: Encoded input / condition tensor to the CVAE x_e.
+            - x_r_t: Robot state (if robot is in scene).
+            - y_e: Encoded label / future of the node.
+            - y_r: Encoded future of the robot.
+            - y: Label / future of the node.
+            - n_s_t0: Standardized current state of the node.
+        """
 
-        return outputs[:, 0, :]
+        enc, x_r_t, y_e, y_r, y = None, None, None, None, None
+        initial_dynamics = dict()
 
-    def encode_edge(
-        self, inputs, inputs_st, inputs_np, edge_type, connected_nodes, edge_masks
-    ):
-        edge_type_tuple = self._get_edge_type_from_str(edge_type)
-        edge_states_list = list()  # list of [#of neighbors, max_ht, state_dim]
-        neighbor_states = list()
+        batch_size = 1
 
-        orig_rel_state = inputs[self.node].cpu().numpy()
-        for node in connected_nodes[0]:
-            neighbor_state_np = inputs_np[node]
+        #########################################
+        # Provide basic information to encoders #
+        #########################################
+        node_history_st_len = obs.agent_hist_len[idx].unsqueeze(0)
+        node_history_st = obs.agent_hist[idx][-node_history_st_len:].unsqueeze(0)
+        
+        node_present_state_st = node_history_st[0, node_history_st_len - 1, :]
 
-            # Make State relative to node
-            _, std = self.env.get_standardize_params(
-                self.state[node.type.name], node_type=node.type
-            )
-            std[0:2] = self.env.attention_radius[edge_type_tuple]
+        initial_dynamics["pos"] = node_present_state_st[:, 0:2]
+        initial_dynamics["vel"] = node_present_state_st[:, 2:4]
 
-            # TODO: This all makes the unsafe assumption that the first n dims
-            #  refer to the same quantities even for different agent types!
-            equal_dims = np.min((neighbor_state_np.shape[-1], orig_rel_state.shape[-1]))
-            rel_state = np.zeros_like(neighbor_state_np)
-            rel_state[..., :equal_dims] = orig_rel_state[..., :equal_dims]
-            neighbor_state_np_st = self.env.standardize(
-                neighbor_state_np,
-                self.state[node.type.name],
-                node_type=node.type,
-                mean=rel_state,
-                std=std,
-            )
+        self.dynamic.set_initial_condition(initial_dynamics)
 
-            neighbor_state = torch.tensor(neighbor_state_np_st).float().to(self.device)
-            neighbor_states.append(neighbor_state)
+        if self.hyperparams["incl_robot_node"]:
+            robot = obs.robot_fut
+            robot_lens = obs.robot_fut_len
+            x_r_t, y_r = robot[:, 0], robot[:, 1:]
 
-        if (
-            len(neighbor_states) == 0
-        ):  # There are no neighbors for edge type # TODO necessary?
-            neighbor_state_length = int(
-                np.sum(
-                    [
-                        len(entity_dims)
-                        for entity_dims in self.state[edge_type_tuple[-1].name].values()
-                    ]
-                )
-            )
-            edge_states_list.append(
-                torch.zeros((1, 1, neighbor_state_length), device=self.device)
-            )
-        else:
-            edge_states_list.append(torch.stack(neighbor_states, dim=0))
-
-        if self.hyperparams["edge_state_combine_method"] == "sum":
-            # Used in Structural-RNN to combine edges as well.
-            op_applied_edge_states_list = list()
-            for neighbors_state in edge_states_list:
-                op_applied_edge_states_list.append(torch.sum(neighbors_state, dim=0))
-            combined_neighbors = torch.stack(op_applied_edge_states_list, dim=0)
-            if self.hyperparams["dynamic_edges"] == "yes":
-                # Should now be (bs, time, 1)
-                op_applied_edge_mask_list = list()
-                for edge_mask in edge_masks:
-                    op_applied_edge_mask_list.append(
-                        torch.clamp(torch.sum(edge_mask, dim=0, keepdim=True), max=1.0)
-                    )
-                combined_edge_masks = torch.stack(op_applied_edge_mask_list, dim=0)
-
-        elif self.hyperparams["edge_state_combine_method"] == "max":
-            # Used in NLP, e.g. max over word embeddings in a sentence.
-            op_applied_edge_states_list = list()
-            for neighbors_state in edge_states_list:
-                op_applied_edge_states_list.append(torch.max(neighbors_state, dim=0))
-            combined_neighbors = torch.stack(op_applied_edge_states_list, dim=0)
-            if self.hyperparams["dynamic_edges"] == "yes":
-                # Should now be (bs, time, 1)
-                op_applied_edge_mask_list = list()
-                for edge_mask in edge_masks:
-                    op_applied_edge_mask_list.append(
-                        torch.clamp(torch.max(edge_mask, dim=0, keepdim=True), max=1.0)
-                    )
-                combined_edge_masks = torch.stack(op_applied_edge_mask_list, dim=0)
-
-        elif self.hyperparams["edge_state_combine_method"] == "mean":
-            # Used in NLP, e.g. mean over word embeddings in a sentence.
-            op_applied_edge_states_list = list()
-            for neighbors_state in edge_states_list:
-                op_applied_edge_states_list.append(torch.mean(neighbors_state, dim=0))
-            combined_neighbors = torch.stack(op_applied_edge_states_list, dim=0)
-            if self.hyperparams["dynamic_edges"] == "yes":
-                # Should now be (bs, time, 1)
-                op_applied_edge_mask_list = list()
-                for edge_mask in edge_masks:
-                    op_applied_edge_mask_list.append(
-                        torch.clamp(torch.mean(edge_mask, dim=0, keepdim=True), max=1.0)
-                    )
-                combined_edge_masks = torch.stack(op_applied_edge_mask_list, dim=0)
-
-        joint_history = torch.cat(
-            [combined_neighbors, torch.unsqueeze(inputs_st[self.node], dim=0)], dim=-1
+        ##################
+        # Encode History #
+        ##################
+        node_history_encoded = self.encode_node_history(
+            mode, node_history_st, node_history_st_len
         )
 
-        if edge_type + "/edge_encoder" not in self.curr_hidden_states:
-            (
-                outputs,
-                self.curr_hidden_states[edge_type + "/edge_encoder"],
-            ) = self.node_modules[edge_type + "/edge_encoder"](joint_history)
-        else:
-            (
-                outputs,
-                self.curr_hidden_states[edge_type + "/edge_encoder"],
-            ) = self.node_modules[edge_type + "/edge_encoder"](
-                joint_history, self.curr_hidden_states[edge_type + "/edge_encoder"]
+        ##################
+        # Encode Present #
+        ##################
+        node_present = node_present_state_st  # [bs, state_dim]
+
+        ##################
+        # Encode Future #
+        ##################
+        # if mode != ModeKeys.PREDICT:
+        #     y = batch.agent_fut[..., :2]
+        #     y_lens = batch.agent_fut_len
+
+        ##############################
+        # Encode Node Edges per Type #
+        ##############################
+        if self.hyperparams["edge_encoding"]:
+            if obs.num_neigh.max() == 0:
+                total_edge_influence = torch.zeros_like(node_history_encoded)
+            else:
+                # Encode edges
+                num_neigh = obs.num_neigh[idx].unsqueeze(0)
+                neigh_hist_len = obs.neigh_hist_len[idx, :num_neigh].unsqueeze(0)
+                neigh_types = obs.neigh_types[idx, :num_neigh].unsqueeze(0)
+                max_hist_len = torch.max(neigh_hist_len)
+                neigh_hist = torch.full((1, num_neigh, max_hist_len, self.state_length), float('nan'))
+                for neigh_idx, hist_len in enumerate(neigh_hist_len):
+                    neigh_hist[0, neigh_idx, :hist_len, :] = obs.neigh_hist[idx, neigh_idx, -hist_len:, :]
+                
+                encoded_edges = self.encode_edge(
+                    mode,
+                    node_history_st,
+                    node_history_st_len,
+                    neigh_hist,
+                    neigh_hist_len,
+                    neigh_types,
+                    num_neigh,
+                )
+                #####################
+                # Encode Node Edges #
+                #####################
+                total_edge_influence, attn_weights = self.encode_total_edge_influence(
+                    mode,
+                    encoded_edges,
+                    num_neigh,
+                    node_history_encoded,
+                    node_history_st_len,
+                    batch_size,
+                )
+
+        ################
+        # Map Encoding #
+        ################
+        if (
+            self.hyperparams["map_encoding"]
+            and self.node_type in self.hyperparams["map_encoder"]
+        ):
+            if (
+                self.hyperparams["log_maps"]
+                and self.log_writer
+                and (self.curr_iter + 1) % 500 == 0
+            ):
+                # TODO: not implemented
+                raise
+                # image = wandb.Image(batch.maps[0], caption=f"Batch Map 0")
+                # self.log_writer.log(
+                #     {f"{self.node_type}/maps": image}, step=self.curr_iter, commit=False
+                # )
+
+            # encoded_map = self.node_modules[self.node_type + "/map_encoder"](
+            #     batch.maps * 2.0 - 1.0, (mode == ModeKeys.TRAIN)
+            # )
+            # do = self.hyperparams["map_encoder"][self.node_type]["dropout"]
+            # encoded_map = F.dropout(encoded_map, do, training=(mode == ModeKeys.TRAIN))
+
+        ######################################
+        # Concatenate Encoder Outputs into x #
+        ######################################
+        enc_concat_list = list()
+
+        # Every node has an edge-influence encoder (which could just be zero).
+        if self.hyperparams["edge_encoding"]:
+            enc_concat_list.append(total_edge_influence)  # [bs/nbs, enc_rnn_dim]
+
+        # Every node has a history encoder.
+        enc_concat_list.append(node_history_encoded)  # [bs/nbs, enc_rnn_dim_history]
+
+        if self.hyperparams["incl_robot_node"]:
+            robot_future_encoder = self.encode_robot_future(
+                mode, x_r_t, y_r, robot_lens
             )
+            enc_concat_list.append(robot_future_encoder)
 
-        if self.hyperparams["dynamic_edges"] == "yes":
-            return outputs[:, 0, :] * combined_edge_masks
-        else:
-            return outputs[:, 0, :]  # [bs, enc_rnn_dim]
+        if (
+            self.hyperparams["map_encoding"]
+            and self.node_type in self.hyperparams["map_encoder"]
+        ):
+            # TODO: not implemented
+            raise
+            # if self.log_writer:
+            #     self.log_writer.log(
+            #         {
+            #             f"{self.node_type}/encoded_map_max": torch.max(
+            #                 torch.abs(encoded_map)
+            #             ).item()
+            #         },
+            #         step=self.curr_iter,
+            #         commit=False,
+            #     )
+            # enc_concat_list.append(
+            #     encoded_map.unsqueeze(1).expand((-1, node_history_encoded.shape[1], -1))
+            #     if self.hyperparams["adaptive"]
+            #     else encoded_map
+            # )
 
-    def encoder_forward(
-        self, inputs, inputs_st, inputs_np, nodes_hist_len, robot_present_and_future=None, maps=None
-    ):
+        enc = torch.cat(enc_concat_list, dim=-1)
+
+        # if mode == ModeKeys.TRAIN or mode == ModeKeys.EVAL:
+        #     y_e = self.encode_node_future(mode, node_present, y, y_lens)
+        #     if self.hyperparams["adaptive"]:
+        #         y_e = y_e.expand((-1, enc.shape[1], -1))
+
+        return enc, x_r_t, y_e, y_r, y
+
+    def encoder_forward(self, obs: AgentBatch, agent_name):
         # Always predicting with the online model.
         mode = ModeKeys.PREDICT
 
-        self.x = self.obtain_encoded_tensors(
-            mode, inputs, inputs_st, inputs_np, nodes_hist_len, robot_present_and_future, maps
-        )
-        self.n_s_t0 = inputs_st[self.node]
+        # index of the agent being tracked (among all agents in scene at current timestep)
+        idx = obs.agent_name.index(agent_name)
+
+        self.x, x_nr_t, _, y_r, _ = self.obtain_encoded_tensors(mode, obs, idx)
+
+        # This is the old n_s_t0 (just the state at the current timestep, t=0).
+        self.n_s_t0: torch.Tensor = obs.agent_hist[idx, -1, :]
+        nan_mask = torch.isnan(self.n_s_t0)
+        self.n_s_t0[nan_mask] = 0
 
         self.latent.p_dist = self.p_z_x(mode, self.x)
 
@@ -492,6 +433,7 @@ class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
     # but if it's given then we'll re-run that part of the model (if the node is adjacent to the robot).
     def decoder_forward(
         self,
+        dt,
         prediction_horizon,
         num_samples,
         robot_present_and_future=None,
@@ -509,38 +451,40 @@ class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
             and self.robot is not None
             and robot_present_and_future is not None
         ):
-            our_inputs = torch.tensor(
-                self.node.get(
-                    np.array([self.node.last_timestep]),
-                    self.state[self.node.type.name],
-                    padding=0.0,
-                ),
-                dtype=torch.float,
-                device=self.device,
-            )
+            # TODO: not implemented
+            raise
+            # our_inputs = torch.tensor(
+            #     self.node.get(
+            #         np.array([self.node.last_timestep]),
+            #         self.state[self.node.type.name],
+            #         padding=0.0,
+            #     ),
+            #     dtype=torch.float,
+            #     device=self.device,
+            # )
 
-            node_state = torch.zeros(
-                (robot_present_and_future.shape[-1],),
-                dtype=torch.float,
-                device=self.device,
-            )
-            node_state[: our_inputs.shape[1]] = our_inputs[0]
+            # node_state = torch.zeros(
+            #     (robot_present_and_future.shape[-1],),
+            #     dtype=torch.float,
+            #     device=self.device,
+            # )
+            # node_state[: our_inputs.shape[1]] = our_inputs[0]
 
-            robot_present_and_future_st = get_relative_robot_traj(
-                self.env,
-                self.state,
-                node_state,
-                robot_present_and_future,
-                self.node.type,
-                self.robot.type,
-            )
-            x_nr_t = robot_present_and_future_st[..., 0, :]
-            y_r = robot_present_and_future_st[..., 1:, :]
-            self.x = self.create_encoder_rep(mode, self.TD, x_nr_t, y_r)
-            self.latent.p_dist = self.p_z_x(mode, self.x)
+            # robot_present_and_future_st = get_relative_robot_traj(
+            #     self.env,
+            #     self.state,
+            #     node_state,
+            #     robot_present_and_future,
+            #     self.node.type,
+            #     self.robot.type,
+            # )
+            # x_nr_t = robot_present_and_future_st[..., 0, :]
+            # y_r = robot_present_and_future_st[..., 1:, :]
+            # self.x = self.create_encoder_rep(mode, self.TD, x_nr_t, y_r)
+            # self.latent.p_dist = self.p_z_x(mode, self.x)
 
-            # Making sure n_s_t0 has the same batch size as x_nr_t
-            self.n_s_t0 = self.n_s_t0[[0]].repeat(x_nr_t.size()[0], 1)
+            # # Making sure n_s_t0 has the same batch size as x_nr_t
+            # self.n_s_t0 = self.n_s_t0[[0]].repeat(x_nr_t.size()[0], 1)
 
         z, num_samples, num_components = self.latent.sample_p(
             num_samples,
@@ -552,15 +496,17 @@ class OnlineMultimodalGenerativeCVAE(MultimodalGenerativeCVAE):
 
         y_dist, our_sampled_future = self.p_y_xz(
             mode,
-            self.x,
-            x_nr_t,
-            y_r,
-            self.n_s_t0,
-            z,
-            prediction_horizon,
-            num_samples,
-            num_components,
-            gmm_mode,
+            x = self.x,
+            x_nr_t=x_nr_t,
+            y_r=y_r,
+            n_s_t0 = self.n_s_t0,
+            pos_hist_len=None,
+            z_stacked=z,
+            dt=dt,
+            prediction_horizon=prediction_horizon,
+            num_samples=num_samples,
+            num_components=num_components,
+            gmm_mode=gmm_mode,
         )
 
         return y_dist, our_sampled_future
