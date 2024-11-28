@@ -60,3 +60,20 @@ def prediction_output_to_trajectories(
                 futures_dict[t][node] = map.to_map_points(future)
 
     return output_dict, histories_dict, futures_dict
+
+def convert_to_world_tf(prediction_output_dict, obs, idx):
+    current_state = obs.curr_agent_state[idx, :2].cpu().numpy()
+    agent_to_world_tf = obs.agents_from_world_tf[idx, :2, :2].cpu().numpy()
+    agent_name = obs.agent_name[idx]
+
+    history_st = obs.agent_hist[idx, :, :2].cpu().numpy()
+    history_st = history_st[~np.isnan(history_st.sum(axis=1))]
+    history = history_st @ agent_to_world_tf + current_state
+
+    future_st = obs.agent_fut[idx, :, :2].cpu().numpy()
+    future_st = future_st[~np.isnan(future_st.sum(axis=1))]
+    future = future_st @ agent_to_world_tf + current_state
+
+    prediction = prediction_output_dict[agent_name] @ agent_to_world_tf + current_state
+
+    return history, future, prediction

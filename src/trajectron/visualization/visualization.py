@@ -23,11 +23,12 @@ import seaborn as sns
 from scipy import linalg
 
 from trajectron.model.components.gmm2d import GMM2D
-from trajectron.utils import prediction_output_to_trajectories
+from trajectron.utils import convert_to_world_tf
 
 
 def plot_trajectories(
     ax,
+    agent_type,
     prediction_dict,
     histories_dict,
     futures_dict,
@@ -42,17 +43,17 @@ def plot_trajectories(
 
     cmap = ["k", "b", "y", "g", "r"]
 
-    for node in histories_dict:
-        history = histories_dict[node]
-        future = futures_dict[node]
-        predictions = prediction_dict[node]
+    for idx, agent_name in enumerate(list(histories_dict.keys())):
+        history = histories_dict[agent_name]
+        future = futures_dict[agent_name]
+        predictions = prediction_dict[agent_name]
 
         if np.isnan(history[-1]).any():
             continue
 
         ax.plot(history[:, 0], history[:, 1], "k--")
 
-        for sample_num in range(prediction_dict[node].shape[1]):
+        for sample_num in range(prediction_dict[agent_name].shape[1]):
 
             if kde and predictions.shape[1] >= 50:
                 line_alpha = 0.2
@@ -70,7 +71,7 @@ def plot_trajectories(
             ax.plot(
                 predictions[batch_num, sample_num, :, 0],
                 predictions[batch_num, sample_num, :, 1],
-                color=cmap[node.type.value],
+                color=cmap[agent_type[idx]],
                 linewidth=line_width,
                 alpha=line_alpha,
             )
@@ -100,31 +101,31 @@ def plot_trajectories(
 
 
 def visualize_prediction(
-    ax, prediction_output_dict, dt, max_hl, ph, robot_node=None, map=None, **kwargs
+    ax, obs, prediction_output_dict, robot_node=None, map=None, **kwargs
 ):
+    # TODO: check if there are agents to predict
+    prediction_dict = dict()
+    histories_dict = dict()
+    futures_dict = dict()
 
-    prediction_dict, histories_dict, futures_dict = prediction_output_to_trajectories(
-        prediction_output_dict, dt, max_hl, ph, map=map
-    )
+    for idx, agent_name in enumerate(prediction_output_dict):
+        history, future, prediction = convert_to_world_tf(prediction_output_dict, obs, idx)
 
-    assert len(prediction_dict.keys()) <= 1
-    if len(prediction_dict.keys()) == 0:
-        return
-    ts_key = list(prediction_dict.keys())[0]
+        histories_dict[agent_name] = history
+        futures_dict[agent_name] = future
+        prediction_dict[agent_name] = prediction
 
-    prediction_dict = prediction_dict[ts_key]
-    histories_dict = histories_dict[ts_key]
-    futures_dict = futures_dict[ts_key]
+    agent_type = obs.agent_type.cpu().numpy()
 
     if map is not None:
         ax.imshow(map.as_image(), origin="lower", alpha=0.5)
-    plot_trajectories(ax, prediction_dict, histories_dict, futures_dict, *kwargs)
+
+    plot_trajectories(ax, agent_type, prediction_dict, histories_dict, futures_dict, *kwargs)
 
 
 def visualize_distribution(
     ax: plt.Axes,
     prediction_distribution_dict: Dict[str, GMM2D],
-    batch_idx: int,
     map=None,
     pi_threshold=0.05,
     **kwargs
@@ -132,47 +133,47 @@ def visualize_distribution(
     if map is not None:
         ax.imshow(map.as_image(), origin="lower", alpha=0.5)
 
-    agent_name = list(prediction_distribution_dict.keys())[batch_idx]
-    pred_dist = prediction_distribution_dict[agent_name]
+    for agent_name in prediction_distribution_dict.keys():
+        pred_dist = prediction_distribution_dict[agent_name]
 
-    if pred_dist.mus.shape[:2] != (1, 1):
-        return
+        if pred_dist.mus.shape[:2] != (1, 1):
+            return
 
-    means = pred_dist.mus[0, 0].cpu().numpy()
-    covs = pred_dist.get_covariance_matrix()[0, 0].cpu().numpy()
-    pis = pred_dist.pis_cat_dist.probs[0, 0].cpu().numpy()
+        means = pred_dist.mus[0, 0].cpu().numpy()
+        covs = pred_dist.get_covariance_matrix()[0, 0].cpu().numpy()
+        pis = pred_dist.pis_cat_dist.probs[0, 0].cpu().numpy()
 
-    ml_idx = np.argmax(pis[0]).item()
+        ml_idx = np.argmax(pis[0]).item()
 
-    for z_val in range(means.shape[1]):
-        pi = pis[0, z_val]  # All pis are the same across time.
+        for z_val in range(means.shape[1]):
+            pi = pis[0, z_val]  # All pis are the same across time.
 
-        if pi < pi_threshold:
-            continue
+            if pi < pi_threshold:
+                continue
 
-        if z_val == ml_idx:
-            color = "red"
-        elif "AgentType.VEHICLE" in agent_name:
-            color = "blue"
-        else:
-            color = "orange"
+            if z_val == ml_idx:
+                color = "red"
+            elif "AgentType.VEHICLE" in agent_name:
+                color = "blue"
+            else:
+                color = "orange"
 
-        alpha_val = pi / 10
-        ax.plot(means[:, z_val, 0], means[:, z_val, 1], color=color, alpha=alpha_val)
+            alpha_val = pi / 10
+            ax.plot(means[:, z_val, 0], means[:, z_val, 1], color=color, alpha=alpha_val)
 
-        for timestep in range(means.shape[0]):
-            mean = means[timestep, z_val]
-            covar = covs[timestep, z_val]
+            for timestep in range(means.shape[0]):
+                mean = means[timestep, z_val]
+                covar = covs[timestep, z_val]
 
-            v, w = linalg.eigh(covar)
-            v = 2.0 * np.sqrt(2.0) * np.sqrt(v)
-            u = w[0] / linalg.norm(w[0])
+                v, w = linalg.eigh(covar)
+                v = 2.0 * np.sqrt(2.0) * np.sqrt(v)
+                u = w[0] / linalg.norm(w[0])
 
-            # Plot an ellipse to show the Gaussian component
-            angle = np.arctan2(u[1], u[0])
-            angle = 180.0 * angle / np.pi  # convert to degrees
-            ell = patches.Ellipse(mean, v[0], v[1], 180.0 + angle, color=color)
-            ell.set_edgecolor(None)
-            ell.set_clip_box(ax.bbox)
-            ell.set_alpha(alpha_val)
-            ax.add_artist(ell)
+                # Plot an ellipse to show the Gaussian component
+                angle = np.arctan2(u[1], u[0])
+                angle = 180.0 * angle / np.pi  # convert to degrees
+                ell = patches.Ellipse(mean, v[0], v[1], 180.0 + angle, color=color)
+                ell.set_edgecolor(None)
+                ell.set_clip_box(ax.bbox)
+                ell.set_alpha(alpha_val)
+                ax.add_artist(ell)
